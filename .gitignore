@@ -1,0 +1,16 @@
+# IDE/Editor
+.claude/
+.vscode/
+__pycache__/
+*.pyc
+
+# Windows
+nul
+Thumbs.db
+
+# Submodules/Other repos
+sheetTool/
+
+# Environment
+.env
+*.log
