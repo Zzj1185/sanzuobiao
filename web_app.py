@@ -39,6 +39,11 @@ EXCEL_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'model.xlsx')
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 最大16MB
 
+# ========== 通义千问视觉模型配置 ==========
+# 请在阿里云百炼平台申请: https://bailian.console.aliyun.com/
+DASHSCOPE_API_KEY = 'sk-353101a483174878aa598c3502ed3ab9'  # 填入你的 DashScope API Key
+# ==========================================
+
 # ========== 百度 OCR 配置 ==========
 # 请在百度AI开放平台申请: https://console.bce.baidu.com/ai/#/ai/ocr/overview/index
 BAIDU_API_KEY = 'bHq1UFwjFAeimASHLP3xXxBh'  # 填入你的 API Key
@@ -100,6 +105,64 @@ def ocr_baidu(image_data):
         return None, f"百度OCR请求失败: {str(e)}"
 
 
+def ocr_qwen_vl(image_data):
+    """使用通义千问视觉模型识别图片中的三坐标数据"""
+    if not DASHSCOPE_API_KEY:
+        return None, "通义千问API未配置"
+
+    # Base64编码
+    if isinstance(image_data, bytes):
+        base64_image = base64.b64encode(image_data).decode('utf-8')
+    else:
+        base64_image = image_data
+
+    url = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+
+    prompt = """请仔细识别这张三坐标测量报告图片中的所有测量点坐标数据。
+请直接输出JSON格式，不要有任何其他文字：
+{"points": [{"no": 1, "x": -201.865, "y": 233.505, "z": 0.000}, ...]}
+
+注意：
+1. no 是点编号
+2. x、y、z 是坐标值，保留原始精度
+3. 如果有多个点，按编号顺序排列"""
+
+    payload = {
+        "model": "qwen-vl-max",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}},
+                    {"type": "text", "text": prompt}
+                ]
+            }
+        ]
+    }
+
+    try:
+        data = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(url, data=data)
+        req.add_header('Content-Type', 'application/json')
+        req.add_header('Authorization', f'Bearer {DASHSCOPE_API_KEY}')
+
+        with urllib.request.urlopen(req, timeout=60) as response:
+            result = json.loads(response.read().decode('utf-8'))
+
+        content = result['choices'][0]['message']['content']
+        # 解析JSON响应（处理可能的markdown代码块包裹）
+        content = content.strip()
+        if content.startswith('```'):
+            # 移除markdown代码块
+            lines = content.split('\n')
+            content = '\n'.join(lines[1:-1] if lines[-1].strip() == '```' else lines[1:])
+        points_data = json.loads(content)
+        return points_data, None
+
+    except Exception as e:
+        return None, f"通义千问请求失败: {str(e)}"
+
+
 def ocr_space(image_data, filename='image.png'):
     """使用OCR.space API识别图片中的文字（备用）"""
     try:
@@ -152,15 +215,24 @@ def ocr_space(image_data, filename='image.png'):
 
 
 def ocr_from_image(image_data, filename='image.png'):
-    """智能OCR识别 - 优先使用百度，失败则用OCR.space"""
-    # 先尝试百度OCR（更准确）
+    """智能OCR识别 - 优先使用通义千问，失败则用百度，最后用OCR.space"""
+
+    # 优先尝试通义千问视觉模型（最准确）
+    if DASHSCOPE_API_KEY:
+        result, error = ocr_qwen_vl(image_data)
+        if result and 'points' in result:
+            # 直接返回结构化数据，标记来源
+            return result, None, 'qwen-vl'
+        print(f"通义千问识别失败: {error}，尝试备用方案...")
+
+    # 备用：百度OCR
     if BAIDU_API_KEY and BAIDU_SECRET_KEY:
         text, error = ocr_baidu(image_data)
         if text:
             return text, None, 'baidu'
         print(f"百度OCR失败: {error}，尝试备用方案...")
 
-    # 备用：OCR.space
+    # 最后备用：OCR.space
     text, error = ocr_space(image_data, filename)
     if text:
         return text, None, 'ocr.space'
@@ -488,13 +560,30 @@ def upload_image():
         if not ocr_text:
             return jsonify({'error': '未能识别到文字'}), 400
 
-        # 解析坐标
-        points = parse_ocr_text(ocr_text)
-
-        # 确保返回给前端的是文本字符串
-        ocr_text_str = ocr_text
-        if isinstance(ocr_text, list):
-            ocr_text_str = process_spatial_ocr(ocr_text)
+        # 根据OCR来源处理结果
+        if ocr_provider == 'qwen-vl':
+            # qwen-vl 直接返回结构化数据
+            raw_points = ocr_text.get('points', [])
+            # 转换格式：将 'no' 字段转为前端期望的 'id' 字段
+            points = []
+            for i, p in enumerate(raw_points):
+                points.append({
+                    'id': p.get('no', i + 1),
+                    'x': p.get('x', 0),
+                    'y': p.get('y', 0),
+                    'z': p.get('z', 0)
+                })
+            # 将结构化数据转为显示用的文本
+            ocr_text_str = '\n'.join([
+                f"no.{p['id']} x={p['x']} y={p['y']} z={p['z']}"
+                for p in points
+            ])
+        else:
+            # 百度/OCR.space 返回文本，需要解析
+            points = parse_ocr_text(ocr_text)
+            ocr_text_str = ocr_text
+            if isinstance(ocr_text, list):
+                ocr_text_str = process_spatial_ocr(ocr_text)
 
         return jsonify({
             'success': True,
@@ -725,13 +814,20 @@ def update_sheet_data(wb, sheet_name, points, tolerance=0.03, image_data=None, f
         # 插入图片
         if image_data:
             try:
+                print(f"[DEBUG] 收到图片数据，长度: {len(image_data)} 字符")
+
                 # 去掉base64头 (data:image/png;base64,...)
                 if ',' in image_data:
-                    image_data = image_data.split(',')[1]
+                    image_data = image_data.split(',', 1)[1]  # 使用 split(',', 1) 确保只分割一次
+
+                print(f"[DEBUG] Base64数据长度: {len(image_data)} 字符")
 
                 img_bytes = base64.b64decode(image_data)
+                print(f"[DEBUG] 解码后图片大小: {len(img_bytes)} 字节")
+
                 img_stream = io.BytesIO(img_bytes)
                 img = ExcelImage(img_stream)
+                print(f"[DEBUG] 图片尺寸: {img.width}x{img.height}")
 
                 # 寻找 A7 所在的合并单元格
                 img_anchor = 'A7'
@@ -824,6 +920,7 @@ def update_sheet_data(wb, sheet_name, points, tolerance=0.03, image_data=None, f
                     img.anchor = OneCellAnchor(_from=marker, ext=size)
 
                     ws.add_image(img)
+                    print(f"[DEBUG] 图片已成功添加到工作表 {sheet_name}")
 
                 else:
                     # 如果不是合并单元格，使用之前的简单逻辑
@@ -835,8 +932,14 @@ def update_sheet_data(wb, sheet_name, points, tolerance=0.03, image_data=None, f
                         img.height = int(img.height * scaling)
 
                     ws.add_image(img, 'A7')
+                    print(f"[DEBUG] 图片已添加到A7单元格 (无合并单元格)")
+
             except Exception as e:
-                print(f"插入图片失败: {e}")
+                error_msg = f"插入图片失败: {e}"
+                print(f"[ERROR] {error_msg}")
+                import traceback
+                traceback.print_exc()
+                # 不返回错误，继续生成Excel（图片失败不影响数据）
 
         return None
 

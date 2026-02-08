@@ -935,6 +935,8 @@
             document.getElementById('image-preview').classList.remove('show');
             document.getElementById('upload-area').style.display = 'block';
             document.getElementById('file-input').value = '';
+            // 重要：清除图片src，防止残留数据
+            document.getElementById('preview-img').src = '';
         }
 
         function updateResultView() {
@@ -1072,10 +1074,16 @@
             // 显示预览
             const reader = new FileReader();
             reader.onload = function(e) {
-                document.getElementById('preview-img').src = e.target.result;
+                const dataUrl = e.target.result;
+                document.getElementById('preview-img').src = dataUrl;
                 document.getElementById('file-name').textContent = file.name;
                 document.getElementById('image-preview').classList.add('show');
                 document.getElementById('upload-area').style.display = 'none';
+
+                // 立即保存图片到当前工作表状态
+                sheetsState[currentSheet].imageSrc = dataUrl;
+                sheetsState[currentSheet].imageName = file.name;
+                console.log(`[handleFile] 图片已保存到 sheetsState[${currentSheet}], 长度: ${dataUrl.length}`);
             };
             reader.readAsDataURL(file);
 
@@ -1317,8 +1325,19 @@
             sheetsState[currentSheet].points = currentPoints;
             sheetsState[currentSheet].fullData = pastedFullData;
             const previewImg = document.getElementById('preview-img');
+            const previewContainer = document.getElementById('image-preview');
+
+            // 调试信息
+            console.log(`[downloadExcel] 当前工作表: ${currentSheet}`);
+            console.log(`[downloadExcel] preview-img.src 长度: ${previewImg.src ? previewImg.src.length : 0}`);
+            console.log(`[downloadExcel] preview-img.src 前50字符: ${previewImg.src ? previewImg.src.substring(0, 50) : 'N/A'}`);
+            console.log(`[downloadExcel] image-preview 是否显示: ${previewContainer.classList.contains('show')}`);
+
             if (previewImg.src && previewImg.src.startsWith('data:')) {
                 sheetsState[currentSheet].imageSrc = previewImg.src;
+                console.log(`[downloadExcel] 已保存图片到 sheetsState[${currentSheet}]`);
+            } else {
+                console.log(`[downloadExcel] 未保存图片 - src不是data URL`);
             }
 
             const filename = document.getElementById('excel-filename').value.trim();
@@ -1338,6 +1357,12 @@
                         points: state.points,
                         image_data: state.imageSrc
                     };
+                    // 调试信息
+                    if (state.imageSrc) {
+                        console.log(`[${sheetName}] 图片数据长度: ${state.imageSrc.length} 字符`);
+                    } else {
+                        console.log(`[${sheetName}] 无图片数据`);
+                    }
                     // 如果有完整数据（粘贴模式），添加full_data
                     if (state.fullData && state.fullData.length > 0) {
                         sheetData.full_data = state.fullData;
